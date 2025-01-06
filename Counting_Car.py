@@ -6,11 +6,17 @@ from sort import *
 import numpy as np
 
 # Video
-cap = cv2.VideoCapture("./Videos/cars.mp4")
+# cap = cv2.VideoCapture("./Videos/test3.mp4")
+# cap = cv2.VideoCapture("./Videos/cars.mp4")
+cap = cv2.VideoCapture("./Videos/v4.mp4")
 
-# Model
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 400)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 300)
+
+# YOLO Model
 model = YOLO("./YOLO_Weights/yolov8l.pt")
 
+# Class Names (COCO)
 coco_classes = [
     "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck", "boat",
     "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
@@ -24,68 +30,91 @@ coco_classes = [
     "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
 ]
 
-# Mask
-mask = cv2.imread("./Images/mask.png")
+# SORT Tracker
+tracker = Sort(max_age=20, min_hits=1, iou_threshold=0.3)
 
-# Tracker
-tracker = Sort(max_age = 20, min_hits = 1, iou_threshold = 0.3)
+# Tracking Line Position
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+tracking_line_y = 520  # Adjust this value to move the tracking line up or down
+tracking_line = [0, tracking_line_y, frame_width, tracking_line_y]
 
-tracking_line = [250, 360, 673, 360]
+# Vehicle Count
 count = []
+vehicle_directions = {}
 
+# Main Loop
 while True:
     ret, frame = cap.read()
     if not ret:
         break
-    else:
-        mask_region = cv2.bitwise_and(frame, mask)
-        results = model(mask_region, stream= True)
-        detections = np.empty((0,5))
-        
-        for r in results:
-            boxes =r.boxes
-            for box in boxes:
-                
-                # Bounding Boxes
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                w,h = x2-x1, y2-y1
-                bbox = int(x1), int(y1), int(w), int(h)
-                
-                # Confidence Score
-                confidence = math.ceil((box.conf[0]*100))/100
 
-                # Class Name
-                cls = int(box.cls[0])
-                current_class = coco_classes[cls]
-                
-                if current_class == "car" or current_class == "truck" or current_class == "bus" or current_class == "motorbike" and confidence >0.1:
-                    current_array = np.array([x1,y1,x2,y2,confidence])
-                    detections = np.vstack((detections,current_array))
-        
-        results_tracker = tracker.update(detections)
-        cv2.line(frame, (tracking_line[0],tracking_line[1]),(tracking_line[2],tracking_line[3]), (255,0,255),4)
-        
-        for result in results_tracker:
-            x1,y1,x2,y2,Id = result
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            w,h = x2-x1, y2-y1
-            bbox = int(x1), int(y1), int(w), int(h)
-            cvzone.cornerRect(frame, bbox, l=4,t=2)
-            cvzone.putTextRect(frame, f"{Id}", (max(0,x1),max(40,y1)), scale=0.7, thickness=1,offset=2)
+    # Run YOLO detection
+    results = model(frame, stream=True)
+    detections = np.empty((0, 5))
+
+    for r in results:
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            w, h = x2 - x1, y2 - y1
+            confidence = round(float(box.conf[0]), 2)
+            cls = int(box.cls[0])
+            current_class = coco_classes[cls]
+
+            # Filter for vehicles
+            if current_class in ["car", "truck", "bus", "motorbike"] and confidence > 0.2:
+                detections = np.vstack((detections, [x1, y1, x2, y2, confidence]))
+
+    # Update tracker
+    tracked_results = tracker.update(detections)
+
+    # Draw tracking line
+    cv2.line(frame, (tracking_line[0], tracking_line[1]), (tracking_line[2], tracking_line[3]), (255, 0, 255), 4)
+
+    for result in tracked_results:
+        x1, y1, x2, y2, obj_id = map(int, result)
+        w, h = x2 - x1, y2 - y1
+        cx, cy = x1 + w // 2, y1 + h // 2
+
+        # Draw bounding box and ID
+        cvzone.cornerRect(frame, (x1, y1, w, h), l=4, t=2)
+        cvzone.putTextRect(frame, f"ID: {obj_id}", (max(0, x1), max(40, y1)), scale=0.7, thickness=1, offset=2)
+
+        # Initialize the direction state if not already initialized
+        if obj_id not in vehicle_directions:
+            vehicle_directions[obj_id] = None
+
+        # Count vehicles crossing the line in a single direction
+        if tracking_line[0] < cx < tracking_line[2] and tracking_line[1] - 15 < cy < tracking_line[1] + 15:
+            if vehicle_directions[obj_id] is None:  # If vehicle hasn't been counted yet
+                # Define vehicle direction
+                if cy > tracking_line[1]:
+                    vehicle_directions[obj_id] = "down"
+                else:
+                    vehicle_directions[obj_id] = "up"
+
+            # Only count the vehicle when it crosses the line in one direction
+            if vehicle_directions[obj_id] == "down" and cy > tracking_line[1]:
+                if obj_id not in count:
+                    count.append(obj_id)
+                    cv2.line(frame, (tracking_line[0], tracking_line[1]), (tracking_line[2], tracking_line[3]), (0, 255, 0), 4)
             
-            cx,cy = x1+w//2, y1+h//2
-            cv2.circle(frame, (cx,cy), 4, (0,0,255),-1)
+            elif vehicle_directions[obj_id] == "up" and cy < tracking_line[1]:
+                if obj_id not in count:
+                    count.append(obj_id)
+                    cv2.line(frame, (tracking_line[0], tracking_line[1]), (tracking_line[2], tracking_line[3]), (0, 255, 0), 4)
 
-            if tracking_line[0] <cx< tracking_line[2] and tracking_line[1] -15 < cy < tracking_line[3]+15:
-                if count.count(Id) == 0:
-                    count.append(Id)
-                    cv2.line(frame, (tracking_line[0],tracking_line[1]),(tracking_line[2],tracking_line[3]), (0,255,0),4)
-                    
-        cvzone.putTextRect(frame, f'Count:{len(count)}',(50,50),scale =2, thickness=2, offset=5)    
-        cv2.imshow("Frame", frame)
-        if cv2.waitKey(1) == ord('q'):
-            break
-        
+        # Reset vehicle direction when it moves far away from the tracking line
+        if cy > tracking_line[1] + 50 or cy < tracking_line[1] - 50:
+            vehicle_directions[obj_id] = None
+
+    # Display count
+    cvzone.putTextRect(frame, f'Count: {len(count)}', (50, 50), scale=2, thickness=2, offset=5)
+
+    # Show Frame
+    cv2.imshow("Frame", frame)
+    if cv2.waitKey(1) == ord('q'):
+        break
+
+# Release resources
 cap.release()
 cv2.destroyAllWindows()
